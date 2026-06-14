@@ -1,0 +1,206 @@
+#include <WiFi.h>
+#include <esp_now.h>
+
+#define SENSOR_PIN 34
+#define RESET_BUTTON 27
+
+#define RELAY_PIN 26
+#define RED_LED 25
+#define GREEN_LED 33
+#define BUZZER 32
+
+typedef struct {
+  bool voltagePresent;
+  int nodeID;
+} Message;
+
+Message incomingMsg;
+
+typedef struct {
+  bool node2Voltage;
+  bool node3Voltage;
+} ForwardMessage;
+
+ForwardMessage txMsg;
+
+uint8_t node1MAC[] = {
+  0xD4,0xE9,0xF4,0xB3,0x4C,0x54
+};
+
+bool node3Status = true;
+
+bool faultLatched = false;
+unsigned long faultStartTime = 0;
+const unsigned long CONFIRM_TIME = 3000; // 10 sec
+
+void OnDataRecv(
+  const esp_now_recv_info_t *info,
+  const uint8_t *incomingData,
+  int len)
+{
+  memcpy(&incomingMsg,
+         incomingData,
+         sizeof(incomingMsg));
+
+  if(incomingMsg.nodeID == 3)
+  {
+    node3Status =
+      incomingMsg.voltagePresent;
+  }
+}
+
+void setup()
+{
+  Serial.begin(115200);
+
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+
+  pinMode(RESET_BUTTON, INPUT_PULLUP);
+
+  WiFi.mode(WIFI_STA);
+
+  if (esp_now_init() != ESP_OK)
+  {
+    Serial.println("ESP-NOW Failed");
+    return;
+  }
+
+  esp_now_register_recv_cb(OnDataRecv);
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr,
+         node1MAC,
+         6);
+
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+  esp_now_add_peer(&peerInfo);
+
+  // Healthy state
+  digitalWrite(RELAY_PIN, LOW);
+
+  Serial.println("NODE2 READY");
+}
+
+void loop()
+{
+    // Manual Reset Button
+
+  if(digitalRead(RESET_BUTTON) == LOW)
+  {
+    faultLatched = false;
+
+    faultStartTime = 0;
+
+    digitalWrite(RELAY_PIN, LOW);
+
+    Serial.println("################");
+    Serial.println("NODE2 RESET");
+    Serial.println("RELAY RECONNECTED");
+    Serial.println("################");
+
+    delay(1000);
+  }
+  int minVal = 4095;
+  int maxVal = 0;
+
+  for(int i=0;i<500;i++)
+  {
+    int val = analogRead(SENSOR_PIN);
+
+    if(val < minVal) minVal = val;
+    if(val > maxVal) maxVal = val;
+
+    delay(1);
+  }
+
+  int amplitude = maxVal - minVal;
+
+  bool node2Voltage = (amplitude > 500);
+
+  // Node2 indicators
+  if(node2Voltage)
+  {
+    digitalWrite(GREEN_LED,HIGH);
+    digitalWrite(RED_LED,LOW);
+    digitalWrite(BUZZER,LOW);
+  }
+  else
+  {
+    digitalWrite(GREEN_LED,LOW);
+    digitalWrite(RED_LED,HIGH);
+    digitalWrite(BUZZER,HIGH);
+  }
+
+  // Fault confirmation timer
+  if(!faultLatched)
+  {
+    if(!node3Status)
+    {
+      if(faultStartTime == 0)
+      {
+        faultStartTime = millis();
+      }
+
+      unsigned long elapsed =
+        millis() - faultStartTime;
+
+      Serial.print("Node3 Fault Timer: ");
+      Serial.print(elapsed / 1000);
+      Serial.println(" sec");
+
+      if(elapsed >= CONFIRM_TIME)
+      {
+        faultLatched = true;
+
+        Serial.println("################");
+        Serial.println("NODE3 FAULT LATCHED");
+        Serial.println("ISOLATING NODE3");
+        Serial.println("################");
+      }
+    }
+    else
+    {
+      faultStartTime = 0;
+    }
+  }
+
+  // Relay control
+  if(faultLatched)
+  {
+    // Fault -> isolate Node3
+    digitalWrite(RELAY_PIN, HIGH);
+  }
+  else
+  {
+    // Healthy -> keep Node3 connected
+    digitalWrite(RELAY_PIN, LOW);
+  }
+
+  txMsg.node2Voltage = node2Voltage;
+  txMsg.node3Voltage = node3Status;
+
+  esp_now_send(
+    node1MAC,
+    (uint8_t *)&txMsg,
+    sizeof(txMsg));
+
+  Serial.print("Node2: ");
+  Serial.print(node2Voltage);
+
+  Serial.print(" Node3: ");
+  Serial.print(node3Status);
+
+  Serial.print(" Relay: ");
+  Serial.print(faultLatched ?
+               "ISOLATED" :
+               "CONNECTED");
+
+  Serial.println();
+
+  delay(1000);
+}
