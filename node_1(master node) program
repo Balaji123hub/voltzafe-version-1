@@ -1,0 +1,202 @@
+#include <WiFi.h>
+#include <esp_now.h>
+
+#define SENSOR_PIN 34
+
+#define RELAY_PIN 26
+#define RED_LED 25
+#define GREEN_LED 33
+#define BUZZER 32
+
+#define RESET_BUTTON 27
+
+typedef struct {
+  bool node2Voltage;
+  bool node3Voltage;
+} ForwardMessage;
+
+ForwardMessage rxMsg;
+
+bool faultLatched = false;
+String latchedFault = "NONE";
+
+unsigned long faultStartTime = 0;
+const unsigned long CONFIRM_TIME = 3000; // 10 seconds
+
+void OnDataRecv(
+const esp_now_recv_info_t *info,
+const uint8_t *incomingData,
+int len)
+{
+  memcpy(&rxMsg,
+         incomingData,
+         sizeof(rxMsg));
+}
+
+void setup()
+{
+  Serial.begin(115200);
+
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+
+  pinMode(RESET_BUTTON, INPUT_PULLUP);
+
+  WiFi.mode(WIFI_STA);
+
+  if(esp_now_init() != ESP_OK)
+  {
+    Serial.println("ESP-NOW FAILED");
+    return;
+  }
+
+  esp_now_register_recv_cb(OnDataRecv);
+
+  digitalWrite(RELAY_PIN, LOW);
+
+  Serial.println("NODE1 MASTER READY");
+}
+
+void loop()
+{
+  // Manual Reset
+  if(digitalRead(RESET_BUTTON) == LOW)
+  {
+    faultLatched = false;
+    latchedFault = "NONE";
+    faultStartTime = 0;
+
+    digitalWrite(RELAY_PIN, LOW);
+
+    Serial.println("FAULT RESET");
+
+    delay(1000);
+  }
+
+  int minVal = 4095;
+  int maxVal = 0;
+
+  for(int i=0;i<500;i++)
+  {
+    int val = analogRead(SENSOR_PIN);
+
+    if(val < minVal) minVal = val;
+    if(val > maxVal) maxVal = val;
+
+    delay(1);
+  }
+
+  int amplitude = maxVal - minVal;
+
+  bool node1Voltage = (amplitude > 500);
+
+  Serial.print("Node1=");
+  Serial.print(node1Voltage);
+
+  Serial.print(" Node2=");
+  Serial.print(rxMsg.node2Voltage);
+
+  Serial.print(" Node3=");
+  Serial.println(rxMsg.node3Voltage);
+
+  if(!faultLatched)
+  {
+    String currentFault = "NONE";
+
+    if(node1Voltage &&
+       rxMsg.node2Voltage &&
+       rxMsg.node3Voltage)
+    {
+      currentFault = "NONE";
+    }
+
+    else if(node1Voltage &&
+            rxMsg.node2Voltage &&
+            !rxMsg.node3Voltage)
+    {
+      currentFault =
+        "FAULT BETWEEN NODE2 AND NODE3";
+    }
+
+    else if(node1Voltage &&
+            !rxMsg.node2Voltage)
+    {
+      currentFault =
+        "FAULT BETWEEN NODE1 AND NODE2";
+    }
+
+    else if(!node1Voltage)
+    {
+      currentFault =
+        "NODE1 SUPPLY FAULT";
+    }
+
+    if(currentFault != "NONE")
+    {
+      if(faultStartTime == 0)
+      {
+        faultStartTime = millis();
+      }
+
+      unsigned long elapsed =
+        millis() - faultStartTime;
+
+      Serial.print("Fault Timer: ");
+      Serial.print(elapsed / 1000);
+      Serial.println(" sec");
+
+      if(elapsed >= CONFIRM_TIME)
+      {
+        faultLatched = true;
+        latchedFault = currentFault;
+
+        Serial.println("################");
+        Serial.println("FAULT LATCHED");
+        Serial.println(latchedFault);
+        Serial.println("################");
+      }
+    }
+    else
+    {
+      faultStartTime = 0;
+    }
+  }
+
+  // Latched Fault State
+  if(faultLatched)
+  {
+    
+    if(latchedFault == "FAULT BETWEEN NODE1 AND NODE2" ||
+       latchedFault == "NODE1 SUPPLY FAULT")
+    {
+        digitalWrite(RELAY_PIN, HIGH); // isolate Node2
+    }
+    else
+    {
+        digitalWrite(RELAY_PIN, LOW);  // keep Node2 connected
+    }
+
+    digitalWrite(RED_LED, HIGH);
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(BUZZER, HIGH);
+
+    Serial.print("LATCHED: ");
+    Serial.println(latchedFault);
+  }
+  else
+  {
+    digitalWrite(RELAY_PIN, LOW);
+
+    digitalWrite(RED_LED, LOW);
+    digitalWrite(GREEN_LED, HIGH);
+    digitalWrite(BUZZER, LOW);
+
+    Serial.println("STATUS: HEALTHY");
+  }
+
+  Serial.println("----------------");
+
+  delay(1000);
+}
