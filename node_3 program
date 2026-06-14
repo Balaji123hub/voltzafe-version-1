@@ -1,0 +1,108 @@
+#include <WiFi.h>
+#include <esp_now.h>
+
+#define SENSOR_PIN 34
+
+#define RELAY_PIN 26
+#define RED_LED 25
+#define GREEN_LED 33
+#define BUZZER 32
+
+typedef struct {
+  bool voltagePresent;
+  int nodeID;
+} Message;
+
+Message msg;
+
+// Node2 MAC
+uint8_t node2MAC[] = {
+  0xD4,0xE9,0xF4,0xB4,0xFE,0xA8
+};
+
+void setup() {
+
+  Serial.begin(115200);
+
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+
+  WiFi.mode(WIFI_STA);
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW Failed");
+    return;
+  }
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, node2MAC, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+  esp_now_add_peer(&peerInfo);
+
+  Serial.println("NODE3 READY");
+}
+
+void loop() {
+
+  int minVal = 4095;
+  int maxVal = 0;
+
+  for(int i=0;i<500;i++) {
+
+    int val = analogRead(SENSOR_PIN);
+
+    if(val < minVal) minVal = val;
+    if(val > maxVal) maxVal = val;
+
+    delay(1);
+  }
+
+  int amplitude = maxVal - minVal;
+
+  bool voltagePresent = (amplitude > 300);
+
+  msg.nodeID = 3;
+  msg.voltagePresent = voltagePresent;
+
+  esp_now_send(node2MAC,
+               (uint8_t *)&msg,
+               sizeof(msg));
+
+  if(voltagePresent) {
+
+    digitalWrite(GREEN_LED, HIGH);
+    digitalWrite(RED_LED, LOW);
+    digitalWrite(BUZZER, LOW);
+
+    // Relay OFF
+    digitalWrite(RELAY_PIN, LOW);
+
+  }
+  else {
+
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(RED_LED, HIGH);
+    digitalWrite(BUZZER, HIGH);
+
+    // Relay ON
+    digitalWrite(RELAY_PIN, HIGH);
+
+  }
+
+  Serial.print("Node3 Amplitude: ");
+  Serial.print(amplitude);
+
+  Serial.print("  Status: ");
+
+  Serial.println(
+    voltagePresent ?
+    "HEALTHY" :
+    "FAULT"
+  );
+
+  delay(1000);
+}
